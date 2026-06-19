@@ -394,7 +394,24 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
     except Exception:
         is_chatgpt_subscription = False
     has_auth = _has_auth_keys(sess.headers)
-    if has_auth and not is_chatgpt_subscription:
+    needs_gateway_client = False
+    try:
+        from urllib.parse import urlparse
+        target_url = getattr(sess, "endpoint_url", "") or ""
+        parsed = urlparse(target_url)
+        host = (parsed.hostname or "").lower()
+        gateway_like = (
+            host in {"mcp-server", "mcp-gateway", "ai-gateway", "ia-gateway"}
+            or parsed.port in {3001, 3002}
+        )
+        has_gateway_client = isinstance(sess.headers, dict) and any(
+            k.lower() == "x-gateway-client" for k in sess.headers
+        )
+        needs_gateway_client = gateway_like and not has_gateway_client
+    except Exception:
+        needs_gateway_client = False
+
+    if has_auth and not is_chatgpt_subscription and not needs_gateway_client:
         return
 
     try:
