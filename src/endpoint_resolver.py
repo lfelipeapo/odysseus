@@ -243,6 +243,21 @@ def build_models_url(base: str) -> Optional[str]:
     return _append_endpoint_path(base, "/models")
 
 
+
+def is_ia_gateway_url(base: str) -> bool:
+    """Return True for IA Gateway endpoints supported by bootstrap/header logic."""
+    try:
+        parsed = urlparse(base or "")
+    except Exception:
+        return False
+
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.port in {3001, 3002}:
+        return True
+
+    gateway_tokens = ("mcp-server", "mcp-gateway", "ai-gateway", "ia-gateway")
+    return any(token in host for token in gateway_tokens)
+
 def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     """Build auth headers for an endpoint."""
     provider = _detect_provider(base)
@@ -266,13 +281,7 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     if _is_kimi_code_url(base):
         headers.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
 
-    parsed = urlparse(base)
-    host = (parsed.hostname or "").lower()
-    gateway_like = (
-        host in {"mcp-server", "mcp-gateway", "ai-gateway", "ia-gateway"}
-        or parsed.port in {3001, 3002}
-    )
-    if gateway_like:
+    if is_ia_gateway_url(base):
         headers.setdefault(
             "X-Gateway-Client",
             os.getenv("ODYSSEUS_GATEWAY_CLIENT", "odysseus").strip() or "odysseus",

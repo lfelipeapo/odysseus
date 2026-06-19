@@ -367,8 +367,9 @@ def setup_webhook_routes(
                 session_id=sid, name="API Chat", endpoint_url=endpoint_url,
                 model=model, owner=token_owner,
             )
-            if api_key:
-                sess.headers = build_headers(api_key, base_url)
+            fallback_headers = build_headers(api_key, base_url)
+            if api_key or fallback_headers:
+                sess.headers = fallback_headers
                 session_manager.save_sessions()
             session_id = sid
 
