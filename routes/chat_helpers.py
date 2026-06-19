@@ -394,11 +394,24 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
     except Exception:
         is_chatgpt_subscription = False
     has_auth = _has_auth_keys(sess.headers)
-    if has_auth and not is_chatgpt_subscription:
+    needs_gateway_client = False
+    try:
+        from src.endpoint_resolver import is_ia_gateway_url
+        has_gateway_client = isinstance(sess.headers, dict) and any(
+            k.lower() == "x-gateway-client" for k in sess.headers
+        )
+        needs_gateway_client = (
+            is_ia_gateway_url(getattr(sess, "endpoint_url", "") or "")
+            and not has_gateway_client
+        )
+    except Exception:
+        needs_gateway_client = False
+
+    if has_auth and not is_chatgpt_subscription and not needs_gateway_client:
         return
 
     try:
-        from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
+        from src.endpoint_resolver import build_headers, resolve_endpoint_runtime, is_ia_gateway_url
         db = SessionLocal()
         try:
             target_url = getattr(sess, "endpoint_url", "") or ""
@@ -419,10 +432,20 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
                 except Exception as e:
                     logger.warning("Failed to resolve provider auth for session %s: %s", session_id, e)
                     return
-                if not api_key:
+                gateway_endpoint = is_ia_gateway_url(base)
+                if not api_key and not gateway_endpoint:
                     # No usable key (e.g. ChatGPT Subscription needs re-auth).
                     return
-                sess.headers = build_headers(api_key, base)
+                if gateway_endpoint and has_auth:
+                    # We entered this path only to backfill X-Gateway-Client.
+                    # Preserve any existing request/session bearer instead of
+                    # replacing it with endpoint DB credentials.
+                    gateway_headers = build_headers(None, base)
+                    merged_headers = dict(sess.headers or {}) if isinstance(sess.headers, dict) else {}
+                    merged_headers.update(gateway_headers)
+                    sess.headers = merged_headers
+                else:
+                    sess.headers = build_headers(api_key, base)
                 if is_chatgpt_subscription:
                     # The bearer is short-lived and re-resolved per request, so it
                     # stays request-local and is never written to the plaintext

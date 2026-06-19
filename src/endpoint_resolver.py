@@ -6,6 +6,7 @@ Consolidates the 4+ copies of normalize_base / resolve_endpoint logic into one p
 
 import json
 import logging
+import os
 import socket
 import subprocess
 from typing import Optional, Tuple, Dict
@@ -242,6 +243,21 @@ def build_models_url(base: str) -> Optional[str]:
     return _append_endpoint_path(base, "/models")
 
 
+
+def is_ia_gateway_url(base: str) -> bool:
+    """Return True for IA Gateway endpoints supported by bootstrap/header logic."""
+    try:
+        parsed = urlparse(base or "")
+    except Exception:
+        return False
+
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.port in {3001, 3002}:
+        return True
+
+    gateway_tokens = ("mcp-server", "mcp-gateway", "ai-gateway", "ia-gateway")
+    return any(token in host for token in gateway_tokens)
+
 def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     """Build auth headers for an endpoint."""
     provider = _detect_provider(base)
@@ -264,6 +280,13 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
         headers.setdefault("X-OpenRouter-Title", "Odysseus")
     if _is_kimi_code_url(base):
         headers.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
+
+    if is_ia_gateway_url(base):
+        headers.setdefault(
+            "X-Gateway-Client",
+            os.getenv("ODYSSEUS_GATEWAY_CLIENT", "odysseus").strip() or "odysseus",
+        )
+
     return headers
 
 
