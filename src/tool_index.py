@@ -42,6 +42,10 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
+    # Global agent instructions may require a document after a low-signal
+    # follow-up (for example, "send the download link"). Latest-message-only
+    # retrieval must not remove the core document creation boundary.
+    "create_document",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
