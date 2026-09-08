@@ -10,7 +10,9 @@ Usage counters (`uses`, `last_used`) live in a sidecar
 content doesn't churn on every retrieval.
 
 Ownership: skills declare `owner: <username>` in frontmatter. Single-user
-deployments can leave that blank.
+deployments can leave that blank. Skills with `source: aidev-managed` are
+external, globally visible, read-only artifacts whose exact bytes are owned by
+the AI Dev Environment rollout transaction.
 
 This module also retains a JSON fallback for any legacy `data/skills.json`
 entries — they're surfaced as read-only `Skill` objects so old data still
@@ -22,12 +24,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Dict, Iterable, List, Optional
 
 from .skill_format import Skill, slugify
 
 logger = logging.getLogger(__name__)
+
+AIDEV_MANAGED_SOURCE = "aidev-managed"
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +57,57 @@ def _to_float(x, default: float = 0.0) -> float:
         return float(x)
     except (TypeError, ValueError):
         return default
+
+
+def _is_aidev_managed(skill: Skill | Dict) -> bool:
+    source = skill.get("source") if isinstance(skill, dict) else skill.source
+    return str(source or "").strip() == AIDEV_MANAGED_SOURCE
+
+
+def _managed_block_scalar_description(text: str) -> Optional[str]:
+    """Read a common YAML block-scalar description without reserializing it.
+
+    Odysseus intentionally uses a tiny frontmatter parser. AIDE skill sources,
+    however, commonly use `description: >`. Managed artifacts are read-only, so
+    all we need here is a lossless-enough read projection for the index while
+    preserving the original SKILL.md bytes untouched.
+    """
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end < 0:
+        return None
+    lines = text[3:end].lstrip("\n").splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^description:\s*([>|])[-+]?\s*$", line, re.IGNORECASE)
+        if match is None:
+            continue
+        style = match.group(1)
+        block: list[str] = []
+        for candidate in lines[index + 1 :]:
+            if candidate and not candidate[0].isspace():
+                break
+            block.append(candidate)
+        nonempty = [item for item in block if item.strip()]
+        if not nonempty:
+            return ""
+        indent = min(len(item) - len(item.lstrip()) for item in nonempty)
+        normalized = [item[indent:] if item.strip() else "" for item in block]
+        if style == "|":
+            return "\n".join(normalized).strip("\n")
+        paragraphs: list[str] = []
+        current: list[str] = []
+        for item in normalized:
+            if not item.strip():
+                if current:
+                    paragraphs.append(" ".join(current))
+                    current = []
+                continue
+            current.append(item.strip())
+        if current:
+            paragraphs.append(" ".join(current))
+        return "\n\n".join(paragraphs)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -167,13 +223,20 @@ class SkillsManager:
         try:
             with open(path, encoding="utf-8") as f:
                 text = f.read()
-            return Skill.from_markdown(text, path=path)
+            sk = Skill.from_markdown(text, path=path)
+            if _is_aidev_managed(sk):
+                description = _managed_block_scalar_description(text)
+                if description is not None:
+                    sk.description = description
+            return sk
         except Exception as e:
             logger.warning(f"Failed to parse {path}: {e}")
             return None
 
-    def _write_skill(self, sk: Skill) -> str:
-        path = self._skill_file(sk.category or "general", sk.name)
+    def _write_skill(self, sk: Skill, *, destination: Optional[str] = None) -> str:
+        if _is_aidev_managed(sk):
+            raise PermissionError(f"AIDE-managed skill is read-only: {sk.name}")
+        path = destination or self._skill_file(sk.category or "general", sk.name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         from core.atomic_io import atomic_write_text
         atomic_write_text(path, sk.to_markdown())
@@ -187,6 +250,9 @@ class SkillsManager:
         them. If strict owner filtering is enabled and SKILL.md files have no
         owner or an owner from a deleted/test account, the UI appears empty even
         though files still exist. This mirrors the DB legacy-owner sweep.
+
+        AIDE-managed skills are global read-only artifacts and deliberately stay
+        ownerless so the startup migration never rewrites rollout-owned bytes.
         """
         primary_owner = (primary_owner or "").strip()
         if not primary_owner:
@@ -197,6 +263,8 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk:
                 continue
+            if _is_aidev_managed(sk):
+                continue
             owner = (sk.owner or "").strip()
             if owner == primary_owner:
                 continue
@@ -204,7 +272,7 @@ class SkillsManager:
                 continue
             sk.owner = primary_owner
             try:
-                self._write_skill(sk)
+                self._write_skill(sk, destination=path)
                 changed += 1
             except Exception as e:
                 logger.warning("Failed to backfill owner for skill %s: %s", sk.name, e)
@@ -279,12 +347,14 @@ class SkillsManager:
         entries = self.load_all()
         if owner is None:
             return entries
-        # SECURITY: strict ownership filter. The previous predicate also
-        # included skills with NO owner field (`not s.get("owner")`), which
-        # leaked legacy / un-stamped skills to every authenticated user.
-        # Hide them now; the owner needs to be backfilled on disk if those
-        # skills should be visible to a specific user.
-        return [s for s in entries if s.get("owner") == owner]
+        # User-owned skills remain strictly owner-scoped. AIDE-managed skills
+        # are intentionally global because their lifecycle belongs to the local
+        # deployment rather than one Odysseus account.
+        return [
+            s
+            for s in entries
+            if s.get("owner") == owner or _is_aidev_managed(s)
+        ]
 
     # ----------------------------------------------------------------------
     # CRUD — disk-backed
@@ -433,20 +503,15 @@ class SkillsManager:
         """`skill_id` is the slug name. Allows updating any field plus
         renames if `name` changes (file is moved on disk).
 
-        The call is owner-scoped: it matches a skill on disk only if
-        `skill.owner == owner` (string compare; both empty-string and
-        None mean "ownerless"). When `owner is None` (the default), the
-        call only matches skills whose own `owner` field is empty —
-        callers that want to edit an owned skill must pass the matching
-        owner explicitly. This prevents a caller with one owner from
-        mutating a file owned by another user that happens to share
-        the same slug across category directories. The `owner` key in
-        `updates` is also ignored — ownership is not an editable field
-        via this path; rename or admin tooling is required for that.
+        AIDE-managed entries are rollout-owned and are deliberately skipped by
+        native CRUD. Audit verdicts and usage remain free to use the sidecar.
         """
         for path in self._iter_skill_files():
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
+                continue
+            if _is_aidev_managed(sk):
+                logger.info("Ignoring native update for AIDE-managed skill %s", sk.name)
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
@@ -507,6 +572,9 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
                 continue
+            if _is_aidev_managed(sk):
+                logger.info("Ignoring native delete for AIDE-managed skill %s", sk.name)
+                continue
             if (sk.owner or "") != (owner or ""):
                 continue
             skill_dir = os.path.dirname(path)
@@ -546,7 +614,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            if not _is_aidev_managed(sk) and (sk.owner or "") != (owner or ""):
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
@@ -562,7 +630,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            if not _is_aidev_managed(sk) and (sk.owner or "") != (owner or ""):
                 continue
             base = os.path.realpath(os.path.dirname(path))
             target = os.path.realpath(os.path.join(base, ref_path))
