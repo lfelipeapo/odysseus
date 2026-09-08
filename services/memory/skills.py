@@ -233,10 +233,10 @@ class SkillsManager:
             logger.warning(f"Failed to parse {path}: {e}")
             return None
 
-    def _write_skill(self, sk: Skill) -> str:
+    def _write_skill(self, sk: Skill, *, destination: Optional[str] = None) -> str:
         if _is_aidev_managed(sk):
             raise PermissionError(f"AIDE-managed skill is read-only: {sk.name}")
-        path = self._skill_file(sk.category or "general", sk.name)
+        path = destination or self._skill_file(sk.category or "general", sk.name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         from core.atomic_io import atomic_write_text
         atomic_write_text(path, sk.to_markdown())
@@ -272,7 +272,7 @@ class SkillsManager:
                 continue
             sk.owner = primary_owner
             try:
-                self._write_skill(sk)
+                self._write_skill(sk, destination=path)
                 changed += 1
             except Exception as e:
                 logger.warning("Failed to backfill owner for skill %s: %s", sk.name, e)

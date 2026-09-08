@@ -62,6 +62,35 @@ def test_managed_skill_crud_and_owner_backfill_do_not_rewrite_bytes(tmp_path: Pa
     assert skill_path.read_bytes() == before == raw.encode("utf-8")
 
 
+def test_owner_backfill_does_not_overwrite_same_name_managed_skill(tmp_path: Path) -> None:
+    manager, managed_path, managed_raw = _managed_fixture(tmp_path)
+    legacy_path = (
+        tmp_path
+        / "data"
+        / "skills"
+        / "legacy-category"
+        / "managed-demo"
+        / "SKILL.md"
+    )
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        """---
+name: managed-demo
+description: Legacy duplicate
+---
+
+# Legacy duplicate
+""",
+        encoding="utf-8",
+    )
+
+    assert manager.backfill_owner("alice", {"alice"}) == 1
+
+    assert managed_path.read_text(encoding="utf-8") == managed_raw
+    assert legacy_path.exists()
+    assert "owner: alice" in legacy_path.read_text(encoding="utf-8")
+
+
 def test_managed_skill_raw_document_and_references_are_globally_readable(tmp_path: Path) -> None:
     manager, _skill_path, raw = _managed_fixture(tmp_path)
 
